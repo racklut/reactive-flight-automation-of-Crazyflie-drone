@@ -1,3 +1,7 @@
+# Takes off
+# flies 1 m back and forth
+# lands
+
 import logging
 import time
 import cflib.crtp
