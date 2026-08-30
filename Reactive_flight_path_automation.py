@@ -11,10 +11,7 @@ from cflib.crazyflie.syncLogger import SyncLogger
 from cflib.crazyflie.log import LogConfig
 from cflib.positioning.motion_commander import MotionCommander
 
-# ============================================================
-# PARAMETERS
-# ============================================================
-
+# --- connection ---
 URI = 'radio://0/80/2M/E7E7E7E7E7'
 
 FLIGHT_HEIGHT        = 0.4
@@ -35,46 +32,32 @@ K_HEIGHT             = 1.2
 HEIGHT_TOLERANCE     = 0.05
 CEILING_DISTANCE     = 0.3
 
-# ── Height smoothing over a time window ────────────────────
+# height gets averaged over a few seconds so it doesn't jump around
+# when flying over furniture etc.
 LOG_PERIOD_MS           = 50
 HEIGHT_AVERAGE_TIME     = 3.0
 HEIGHT_AVERAGE_SAMPLES  = int((HEIGHT_AVERAGE_TIME * 1000) / LOG_PERIOD_MS)
 
-# ============================================================
-# WAYPOINT NAVIGATION
-# ============================================================
-#
-# Coordinates relative to the starting point (take-off position), in meters:
-#   x = forward (heading direction at start)
-#   y = left
-#   z = height above ground
-#
-# Format per waypoint: (x, y)  OR  (x, y, z)
-# If z is missing, FLIGHT_HEIGHT is used.
-#
-# If WAYPOINTS is empty -> "Explore mode": the drone flies
-# straight forward and avoids obstacles.
-#
+# Waypoints are relative to takeoff position, in meters.
+# x = forward, y = left, z = height (optional, defaults to FLIGHT_HEIGHT)
+# Leave empty for explore mode (fly forward, avoid stuff).
 WAYPOINTS = [
-    (1.0, 0.0),
-    (1.0, 1.0),
-    (1.0, -1.0),
+    (0.0, 1.0),
+    (2.5, 1.0),
+    (2.5, 0.5),
+    (3.5, 0.5),
 ]
 
-RETURN_TO_HOME       = True    # return to (0,0) after the last waypoint
-WAYPOINT_TOLERANCE   = 0.05    # m - distance at which a waypoint is considered reached
-WAYPOINT_TIMEOUT     = 25.0    # s - max. time per waypoint, then skip
-GOAL_SPEED_MAX       = 0.2     # m/s - max. speed towards the target
-K_ATTRACTION         = 0.8     # P-controller gain towards the target
+RETURN_TO_HOME       = False
+WAYPOINT_TOLERANCE   = 0.05
+WAYPOINT_TIMEOUT     = 25.0
+GOAL_SPEED_MAX       = 0.2
+K_ATTRACTION         = 0.8
 
-# ============================================================
-# POSITION ESTIMATOR (KALMAN FILTER) - CONVERGENCE CHECK
-# ============================================================
-
-ESTIMATOR_TIMEOUT       = 5.0   # s - max. wait time for convergence
-ESTIMATOR_THRESHOLD     = 0.05  # target threshold for variance spread
-ESTIMATOR_STATUS_EVERY  = 1.0    # s - interval for diagnostic output
-ABORT_ON_ESTIMATOR_FAIL = False  # True = abort mission if convergence fails
+ESTIMATOR_TIMEOUT       = 5.0
+ESTIMATOR_THRESHOLD     = 0.05
+ESTIMATOR_STATUS_EVERY  = 1.0
+ABORT_ON_ESTIMATOR_FAIL = False
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -102,13 +85,12 @@ sensor_history = {
 
 height_history = deque(maxlen=HEIGHT_AVERAGE_SAMPLES)
 
-# ── Position estimate (Flow Deck / Kalman filter) ──────
 current_position = {'x': 0.0, 'y': 0.0, 'z': 0.0}
 
-current_state        = STATE_TAKEOFF
-shutdown_requested    = False
-avoid_state           = AVOID_NONE
-target_height         = FLIGHT_HEIGHT   # current target height (changeable per waypoint)
+current_state       = STATE_TAKEOFF
+shutdown_requested   = False
+avoid_state          = AVOID_NONE
+target_height        = FLIGHT_HEIGHT
 
 SENSOR_MAX_RANGE = 4.0
 
@@ -121,10 +103,6 @@ def signal_handler(sig, frame):
 
 signal.signal(signal.SIGINT, signal_handler)
 
-
-# ============================================================
-# SENSOR AND POSITION CALLBACKS
-# ============================================================
 
 def sensor_callback(timestamp, data, logconf):
     global sensor_data
@@ -160,10 +138,6 @@ def get_position():
     return current_position['x'], current_position['y'], current_position['z']
 
 
-# ============================================================
-# HELPER FUNCTIONS
-# ============================================================
-
 def get_filtered(key):
     history = sensor_history[key]
     if len(history) == 0:
@@ -188,7 +162,7 @@ def compute_repulsion(distance, avoid_dist, k):
 
 
 def compute_forward_speed():
-    """Only used in Explore mode (no active waypoint)."""
+    # only used in explore mode
     front = get_filtered('front')
 
     if front >= AVOID_DISTANCE:
@@ -200,10 +174,7 @@ def compute_forward_speed():
 
 
 def compute_goal_velocity(dx, dy, dist):
-    """
-    Attraction component towards the waypoint
-    (P-controller with speed cap -> smooth deceleration near the target).
-    """
+    # simple P-controller with a speed cap, slows down near target
     if dist < 1e-6:
         return 0.0, 0.0
     speed = min(GOAL_SPEED_MAX, K_ATTRACTION * dist)
@@ -227,13 +198,8 @@ def compute_height_correction():
 
 
 def apply_bug_avoidance(vx_goal, vy_goal, vx, vy):
-    """
-    Generalized "bug" avoidance logic: detects whether the axis in
-    the direction of the (goal) velocity vector is blocked, and
-    dodges along the other axis. Works regardless of whether the
-    drone needs to fly forward, backward, or sideways towards
-    the target.
-    """
+    # picks whichever axis isn't blocked to dodge around obstacles,
+    # works no matter which direction we're trying to fly
     global avoid_state
 
     front = get_filtered('front')
@@ -270,10 +236,6 @@ def apply_bug_avoidance(vx_goal, vy_goal, vx, vy):
 
 
 def compute_velocity(dx=None, dy=None, dist=None):
-    """
-    Combines goal attraction (if dx/dy are set, otherwise Explore mode)
-    with sensor-based repulsion (potential field) + bug avoidance logic.
-    """
     front = get_filtered('front')
     back  = get_filtered('back')
     left  = get_filtered('left')
@@ -320,25 +282,9 @@ def print_status(vx, vy, vz, goal_info=""):
     )
 
 
-# ============================================================
-# RESET POSITION ESTIMATOR & WAIT FOR CONVERGENCE
-# ============================================================
-
-def wait_for_position_estimator(scf,
-                                 timeout=ESTIMATOR_TIMEOUT,
-                                 threshold=ESTIMATOR_THRESHOLD):
-    """
-    Waits until the Kalman variance for x/y/z is stable enough.
-
-    Improvements over the standard Bitcraze version:
-      - Timeout, so the script doesn't hang forever (e.g. due to
-        poor lighting or an unstructured surface, causing the
-        threshold to never be reached)
-      - Continuous diagnostic output, showing whether and how
-        quickly the values stabilize
-      - Return value (True/False), so main() can react accordingly
-        (e.g. abort the mission)
-    """
+def wait_for_position_estimator(scf, timeout=ESTIMATOR_TIMEOUT, threshold=ESTIMATOR_THRESHOLD):
+    # bitcraze's example version has no timeout - it can hang forever
+    # on a bad surface, so added one here plus some status output
     print("[INFO] Waiting for position estimator to converge...")
 
     log_config = LogConfig(name='KalmanVariance', period_in_ms=100)
@@ -391,17 +337,13 @@ def wait_for_position_estimator(scf,
 
 
 def reset_estimator(scf):
-    scf.cf.param.set_value('stabilizer.estimator', '2')  # force Kalman filter
+    scf.cf.param.set_value('stabilizer.estimator', '2')
     time.sleep(0.1)
     scf.cf.param.set_value('kalman.resetEstimation', '1')
     time.sleep(0.1)
     scf.cf.param.set_value('kalman.resetEstimation', '0')
     return wait_for_position_estimator(scf)
 
-
-# ============================================================
-# NORMALIZE WAYPOINTS
-# ============================================================
 
 def normalize_waypoint(wp):
     if len(wp) == 2:
@@ -417,10 +359,6 @@ def build_mission():
             mission.append((0.0, 0.0, FLIGHT_HEIGHT))
     return mission
 
-
-# ============================================================
-# FLY TO WAYPOINT
-# ============================================================
 
 def fly_to_waypoint(mc, goal_x, goal_y, goal_z, index, total, mission_start_time):
     global avoid_state, target_height, shutdown_requested
@@ -474,10 +412,6 @@ def fly_explore_mode(mc):
         time.sleep(LOOP_DT)
 
 
-# ============================================================
-# MAIN PROGRAM
-# ============================================================
-
 def main():
     global current_state, shutdown_requested
 
@@ -488,7 +422,6 @@ def main():
 
     with SyncCrazyflie(URI, cf=Crazyflie(rw_cache='./cache')) as scf:
 
-        # ── Sensor log (Multiranger) ──────────────────
         sensor_log = LogConfig(name='Ranger', period_in_ms=LOG_PERIOD_MS)
         sensor_log.add_variable('range.front',  'uint16_t')
         sensor_log.add_variable('range.back',   'uint16_t')
@@ -501,7 +434,6 @@ def main():
         sensor_log.data_received_cb.add_callback(sensor_callback)
         sensor_log.start()
 
-        # ── Position log (Flow Deck / Kalman) ────────
         position_log = LogConfig(name='Position', period_in_ms=100)
         position_log.add_variable('stateEstimate.x', 'float')
         position_log.add_variable('stateEstimate.y', 'float')
@@ -513,7 +445,6 @@ def main():
 
         time.sleep(0.5)
 
-        # ── Reset Kalman filter & wait for convergence ──
         converged = reset_estimator(scf)
 
         if not converged and ABORT_ON_ESTIMATOR_FAIL:
@@ -525,7 +456,6 @@ def main():
 
         with MotionCommander(scf, default_height=FLIGHT_HEIGHT) as mc:
 
-            # ── TAKEOFF ──────────────────────────────
             current_state = STATE_TAKEOFF
             print(f"[{STATE_TAKEOFF}]")
             time.sleep(2.0)
@@ -535,7 +465,6 @@ def main():
             current_state = STATE_FLIGHT
             print(f"[{STATE_FLIGHT}]\n")
 
-            # ── FLIGHT / NAVIGATION ──────────────────
             mission = build_mission()
             mission_start_time = time.time()
 
@@ -549,7 +478,6 @@ def main():
             else:
                 fly_explore_mode(mc)
 
-            # ── LANDING ──────────────────────────────
             current_state = STATE_LANDING
             print(f"\n[{STATE_LANDING}]")
 
