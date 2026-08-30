@@ -12,7 +12,7 @@ from cflib.crazyflie.log import LogConfig
 from cflib.positioning.motion_commander import MotionCommander
 
 # ============================================================
-# PARAMETER
+# PARAMETERS
 # ============================================================
 
 URI = 'radio://0/80/2M/E7E7E7E7E7'
@@ -35,47 +35,46 @@ K_HEIGHT             = 1.2
 HEIGHT_TOLERANCE     = 0.05
 CEILING_DISTANCE     = 0.3
 
-# ── Höhenglättung über Zeitfenster ────────────────────
+# ── Height smoothing over a time window ────────────────────
 LOG_PERIOD_MS           = 50
 HEIGHT_AVERAGE_TIME     = 3.0
 HEIGHT_AVERAGE_SAMPLES  = int((HEIGHT_AVERAGE_TIME * 1000) / LOG_PERIOD_MS)
 
 # ============================================================
-# WEGPUNKT-NAVIGATION
+# WAYPOINT NAVIGATION
 # ============================================================
 #
-# Koordinaten relativ zum Startpunkt (Take-off-Position), in Metern:
-#   x = vorwärts (Blickrichtung beim Start)
-#   y = links
-#   z = Höhe über Grund
+# Coordinates relative to the starting point (take-off position), in meters:
+#   x = forward (heading direction at start)
+#   y = left
+#   z = height above ground
 #
-# Format je Wegpunkt: (x, y)  ODER  (x, y, z)
-# Fehlt z, wird FLIGHT_HEIGHT verwendet.
+# Format per waypoint: (x, y)  OR  (x, y, z)
+# If z is missing, FLIGHT_HEIGHT is used.
 #
-# Ist WAYPOINTS leer -> "Explore-Modus": die Drohne fliegt
-# konstant vorwärts und weicht Hindernissen aus.
+# If WAYPOINTS is empty -> "Explore mode": the drone flies
+# straight forward and avoids obstacles.
 #
 WAYPOINTS = [
-    (0.0, 1.0),
-    (2.5, 1.0),
-    (2.5, 0.5),
-    (3.5, 0.5),
+    (1.0, 0.0),
+    (1.0, 1.0),
+    (1.0, -1.0),
 ]
 
-RETURN_TO_HOME       = False    # nach letztem Wegpunkt zurück zu (0,0)
-WAYPOINT_TOLERANCE   = 0.05    # m - ab wann gilt ein Wegpunkt als erreicht
-WAYPOINT_TIMEOUT     = 25.0    # s - max. Zeit pro Wegpunkt, dann überspringen
-GOAL_SPEED_MAX       = 0.2     # m/s - max. Geschwindigkeit Richtung Ziel
-K_ATTRACTION         = 0.8     # P-Regler-Verstärkung Richtung Ziel
+RETURN_TO_HOME       = True    # return to (0,0) after the last waypoint
+WAYPOINT_TOLERANCE   = 0.05    # m - distance at which a waypoint is considered reached
+WAYPOINT_TIMEOUT     = 25.0    # s - max. time per waypoint, then skip
+GOAL_SPEED_MAX       = 0.2     # m/s - max. speed towards the target
+K_ATTRACTION         = 0.8     # P-controller gain towards the target
 
 # ============================================================
-# POSITIONSSCHÄTZER (KALMAN-FILTER) - KONVERGENZPRÜFUNG
+# POSITION ESTIMATOR (KALMAN FILTER) - CONVERGENCE CHECK
 # ============================================================
 
-ESTIMATOR_TIMEOUT       = 5.0   # s - max. Wartezeit auf Konvergenz
-ESTIMATOR_THRESHOLD     = 0.05  # Ziel-Schwellwert für Varianz-Spanne
-ESTIMATOR_STATUS_EVERY  = 1.0    # s - Intervall für Diagnose-Ausgabe
-ABORT_ON_ESTIMATOR_FAIL = False  # True = Mission abbrechen, falls Konvergenz scheitert
+ESTIMATOR_TIMEOUT       = 5.0   # s - max. wait time for convergence
+ESTIMATOR_THRESHOLD     = 0.05  # target threshold for variance spread
+ESTIMATOR_STATUS_EVERY  = 1.0    # s - interval for diagnostic output
+ABORT_ON_ESTIMATOR_FAIL = False  # True = abort mission if convergence fails
 
 logging.basicConfig(level=logging.ERROR)
 
@@ -103,20 +102,20 @@ sensor_history = {
 
 height_history = deque(maxlen=HEIGHT_AVERAGE_SAMPLES)
 
-# ── Positionsschätzung (Flow Deck / Kalman-Filter) ──────
+# ── Position estimate (Flow Deck / Kalman filter) ──────
 current_position = {'x': 0.0, 'y': 0.0, 'z': 0.0}
 
 current_state        = STATE_TAKEOFF
 shutdown_requested    = False
 avoid_state           = AVOID_NONE
-ziel_hoehe            = FLIGHT_HEIGHT   # aktuelle Soll-Höhe (pro Wegpunkt änderbar)
+target_height         = FLIGHT_HEIGHT   # current target height (changeable per waypoint)
 
 SENSOR_MAX_RANGE = 4.0
 
 
 def signal_handler(sig, frame):
     global shutdown_requested
-    print("\n[INFO] STRG+C erkannt → Landung wird eingeleitet...")
+    print("\n[INFO] STRG+C detected → initiating landing...")
     shutdown_requested = True
 
 
@@ -124,7 +123,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 
 # ============================================================
-# SENSOR- UND POSITIONS-CALLBACKS
+# SENSOR AND POSITION CALLBACKS
 # ============================================================
 
 def sensor_callback(timestamp, data, logconf):
@@ -162,7 +161,7 @@ def get_position():
 
 
 # ============================================================
-# HILFSFUNKTIONEN
+# HELPER FUNCTIONS
 # ============================================================
 
 def get_filtered(key):
@@ -182,28 +181,28 @@ def clamp(value, min_val, max_val):
     return max(min_val, min(max_val, value))
 
 
-def berechne_abstoßung(distanz, avoid_dist, k):
-    if distanz < avoid_dist and distanz > 0:
-        return k * (1.0 / distanz - 1.0 / avoid_dist)
+def compute_repulsion(distance, avoid_dist, k):
+    if distance < avoid_dist and distance > 0:
+        return k * (1.0 / distance - 1.0 / avoid_dist)
     return 0.0
 
 
-def berechne_forward_speed():
-    """Nur für den Explore-Modus (kein Wegpunkt aktiv)."""
+def compute_forward_speed():
+    """Only used in Explore mode (no active waypoint)."""
     front = get_filtered('front')
 
     if front >= AVOID_DISTANCE:
         return FORWARD_SPEED
 
-    faktor = (front - CRITICAL_DISTANCE) / (AVOID_DISTANCE - CRITICAL_DISTANCE)
-    faktor = clamp(faktor, 0.0, 1.0)
-    return FORWARD_SPEED * faktor
+    factor = (front - CRITICAL_DISTANCE) / (AVOID_DISTANCE - CRITICAL_DISTANCE)
+    factor = clamp(factor, 0.0, 1.0)
+    return FORWARD_SPEED * factor
 
 
-def berechne_zielgeschwindigkeit(dx, dy, dist):
+def compute_goal_velocity(dx, dy, dist):
     """
-    Anziehungs-Komponente Richtung Wegpunkt
-    (P-Regler mit Geschwindigkeitsdeckel -> sanftes Abbremsen kurz vorm Ziel).
+    Attraction component towards the waypoint
+    (P-controller with speed cap -> smooth deceleration near the target).
     """
     if dist < 1e-6:
         return 0.0, 0.0
@@ -211,29 +210,29 @@ def berechne_zielgeschwindigkeit(dx, dy, dist):
     return speed * dx / dist, speed * dy / dist
 
 
-def berechne_hoehenkorrektur():
-    aktuelle_hoehe = get_average_height()
-    fehler = ziel_hoehe - aktuelle_hoehe
+def compute_height_correction():
+    current_height = get_average_height()
+    error = target_height - current_height
 
-    if abs(fehler) < HEIGHT_TOLERANCE:
+    if abs(error) < HEIGHT_TOLERANCE:
         vz_height = 0.0
     else:
-        vz_height = clamp(fehler * K_HEIGHT, -MAX_Z_SPEED, MAX_Z_SPEED)
+        vz_height = clamp(error * K_HEIGHT, -MAX_Z_SPEED, MAX_Z_SPEED)
 
     up = get_filtered('up')
-    vz_ceiling = -berechne_abstoßung(up, CEILING_DISTANCE, K_REPULSION_CRIT)
+    vz_ceiling = -compute_repulsion(up, CEILING_DISTANCE, K_REPULSION_CRIT)
 
     vz = vz_height + vz_ceiling
     return clamp(vz, -MAX_Z_SPEED, MAX_Z_SPEED)
 
 
-def wende_bug_ausweichlogik_an(vx_goal, vy_goal, vx, vy):
+def apply_bug_avoidance(vx_goal, vy_goal, vx, vy):
     """
-    Verallgemeinerte "Bug"-Ausweichlogik: erkennt, ob die Achse in
-    Richtung des (Ziel-)Geschwindigkeitsvektors blockiert ist, und
-    weicht auf der jeweils anderen Achse aus. Funktioniert unabhängig
-    davon, ob die Drohne vorwärts, rückwärts oder seitwärts zum Ziel
-    fliegen muss.
+    Generalized "bug" avoidance logic: detects whether the axis in
+    the direction of the (goal) velocity vector is blocked, and
+    dodges along the other axis. Works regardless of whether the
+    drone needs to fly forward, backward, or sideways towards
+    the target.
     """
     global avoid_state
 
@@ -243,25 +242,25 @@ def wende_bug_ausweichlogik_an(vx_goal, vy_goal, vx, vy):
     right = get_filtered('right')
 
     if abs(vx_goal) >= abs(vy_goal):
-        blockiert = (vx_goal >= 0 and front < AVOID_DISTANCE) or \
-                    (vx_goal <  0 and back  < AVOID_DISTANCE)
+        blocked = (vx_goal >= 0 and front < AVOID_DISTANCE) or \
+                  (vx_goal <  0 and back  < AVOID_DISTANCE)
 
-        if blockiert:
+        if blocked:
             if avoid_state not in (AVOID_LEFT, AVOID_RIGHT):
                 avoid_state = AVOID_LEFT if left >= right else AVOID_RIGHT
-                print(f"[AVOID] Blockiert auf X-Achse → weiche {avoid_state} aus "
+                print(f"[AVOID] Blocked on X-axis → dodging {avoid_state} "
                       f"(L={left:.2f}m R={right:.2f}m)")
             vy += SIDE_AVOID_SPEED if avoid_state == AVOID_LEFT else -SIDE_AVOID_SPEED
         else:
             avoid_state = AVOID_NONE
     else:
-        blockiert = (vy_goal >= 0 and left  < AVOID_DISTANCE) or \
-                    (vy_goal <  0 and right < AVOID_DISTANCE)
+        blocked = (vy_goal >= 0 and left  < AVOID_DISTANCE) or \
+                  (vy_goal <  0 and right < AVOID_DISTANCE)
 
-        if blockiert:
+        if blocked:
             if avoid_state not in (AVOID_FRONT, AVOID_BACK):
                 avoid_state = AVOID_FRONT if front >= back else AVOID_BACK
-                print(f"[AVOID] Blockiert auf Y-Achse → weiche {avoid_state} aus "
+                print(f"[AVOID] Blocked on Y-axis → dodging {avoid_state} "
                       f"(F={front:.2f}m B={back:.2f}m)")
             vx += SIDE_AVOID_SPEED if avoid_state == AVOID_FRONT else -SIDE_AVOID_SPEED
         else:
@@ -270,10 +269,10 @@ def wende_bug_ausweichlogik_an(vx_goal, vy_goal, vx, vy):
     return vx, vy
 
 
-def berechne_geschwindigkeit(dx=None, dy=None, dist=None):
+def compute_velocity(dx=None, dy=None, dist=None):
     """
-    Kombiniert Zielanziehung (falls dx/dy gesetzt, sonst Explore-Modus)
-    mit sensorbasierter Abstoßung (Potentialfeld) + Bug-Ausweichlogik.
+    Combines goal attraction (if dx/dy are set, otherwise Explore mode)
+    with sensor-based repulsion (potential field) + bug avoidance logic.
     """
     front = get_filtered('front')
     back  = get_filtered('back')
@@ -281,26 +280,26 @@ def berechne_geschwindigkeit(dx=None, dy=None, dist=None):
     right = get_filtered('right')
 
     if dx is None:
-        vx_goal = berechne_forward_speed()
+        vx_goal = compute_forward_speed()
         vy_goal = 0.0
     else:
-        vx_goal, vy_goal = berechne_zielgeschwindigkeit(dx, dy, dist)
+        vx_goal, vy_goal = compute_goal_velocity(dx, dy, dist)
 
     vx = vx_goal
-    vx -= berechne_abstoßung(front, AVOID_DISTANCE,    K_REPULSION)
-    vx += berechne_abstoßung(back,  AVOID_DISTANCE,    K_REPULSION)
-    vx -= berechne_abstoßung(front, CRITICAL_DISTANCE, K_REPULSION_CRIT)
-    vx += berechne_abstoßung(back,  CRITICAL_DISTANCE, K_REPULSION_CRIT)
+    vx -= compute_repulsion(front, AVOID_DISTANCE,    K_REPULSION)
+    vx += compute_repulsion(back,  AVOID_DISTANCE,    K_REPULSION)
+    vx -= compute_repulsion(front, CRITICAL_DISTANCE, K_REPULSION_CRIT)
+    vx += compute_repulsion(back,  CRITICAL_DISTANCE, K_REPULSION_CRIT)
 
     vy = vy_goal
-    vy -= berechne_abstoßung(left,  AVOID_DISTANCE,    K_REPULSION)
-    vy += berechne_abstoßung(right, AVOID_DISTANCE,    K_REPULSION)
-    vy -= berechne_abstoßung(left,  CRITICAL_DISTANCE, K_REPULSION_CRIT)
-    vy += berechne_abstoßung(right, CRITICAL_DISTANCE, K_REPULSION_CRIT)
+    vy -= compute_repulsion(left,  AVOID_DISTANCE,    K_REPULSION)
+    vy += compute_repulsion(right, AVOID_DISTANCE,    K_REPULSION)
+    vy -= compute_repulsion(left,  CRITICAL_DISTANCE, K_REPULSION_CRIT)
+    vy += compute_repulsion(right, CRITICAL_DISTANCE, K_REPULSION_CRIT)
 
-    vx, vy = wende_bug_ausweichlogik_an(vx_goal, vy_goal, vx, vy)
+    vx, vy = apply_bug_avoidance(vx_goal, vy_goal, vx, vy)
 
-    vz = berechne_hoehenkorrektur()
+    vz = compute_height_correction()
 
     vx = clamp(vx, -MAX_SPEED, MAX_SPEED)
     vy = clamp(vy, -MAX_SPEED, MAX_SPEED)
@@ -308,7 +307,7 @@ def berechne_geschwindigkeit(dx=None, dy=None, dist=None):
     return vx, vy, vz
 
 
-def print_status(vx, vy, vz, ziel_info=""):
+def print_status(vx, vy, vz, goal_info=""):
     x, y, z = get_position()
     print(
         f"[{current_state:10}] "
@@ -317,30 +316,30 @@ def print_status(vx, vy, vz, ziel_info=""):
         f"L:{get_filtered('left'):5.2f}m R:{get_filtered('right'):5.2f}m "
         f"D_avg:{get_average_height():5.2f}m "
         f"| vx:{vx:+.2f} vy:{vy:+.2f} vz:{vz:+.2f} "
-        f"| Ausweichen:{avoid_state} {ziel_info}"
+        f"| Avoiding:{avoid_state} {goal_info}"
     )
 
 
 # ============================================================
-# POSITIONS-SCHÄTZER ZURÜCKSETZEN & AUF KONVERGENZ WARTEN
+# RESET POSITION ESTIMATOR & WAIT FOR CONVERGENCE
 # ============================================================
 
 def wait_for_position_estimator(scf,
                                  timeout=ESTIMATOR_TIMEOUT,
                                  threshold=ESTIMATOR_THRESHOLD):
     """
-    Wartet, bis die Kalman-Varianz für x/y/z stabil genug ist.
+    Waits until the Kalman variance for x/y/z is stable enough.
 
-    Verbesserungen gegenüber der Standard-Bitcraze-Version:
-      - Timeout, damit das Skript nicht ewig hängt (z. B. bei
-        schlechter Beleuchtung oder unstrukturiertem Untergrund,
-        wodurch der Schwellwert nie unterschritten wird)
-      - Laufende Diagnose-Ausgabe, damit sichtbar ist, ob und wie
-        schnell sich die Werte stabilisieren
-      - Rückgabewert (True/False), damit main() bei Bedarf reagieren
-        kann (z. B. Mission abbrechen)
+    Improvements over the standard Bitcraze version:
+      - Timeout, so the script doesn't hang forever (e.g. due to
+        poor lighting or an unstructured surface, causing the
+        threshold to never be reached)
+      - Continuous diagnostic output, showing whether and how
+        quickly the values stabilize
+      - Return value (True/False), so main() can react accordingly
+        (e.g. abort the mission)
     """
-    print("[INFO] Warte auf Konvergenz des Positionsschätzers...")
+    print("[INFO] Waiting for position estimator to converge...")
 
     log_config = LogConfig(name='KalmanVariance', period_in_ms=100)
     log_config.add_variable('kalman.varPX', 'float')
@@ -354,7 +353,7 @@ def wait_for_position_estimator(scf,
     }
 
     start_time = time.time()
-    letzte_ausgabe = start_time
+    last_output = start_time
 
     with SyncLogger(scf, log_config) as logger:
         for log_entry in logger:
@@ -364,35 +363,35 @@ def wait_for_position_estimator(scf,
             var_history['y'].append(data['kalman.varPY'])
             var_history['z'].append(data['kalman.varPZ'])
 
-            spanne_x = max(var_history['x']) - min(var_history['x'])
-            spanne_y = max(var_history['y']) - min(var_history['y'])
-            spanne_z = max(var_history['z']) - min(var_history['z'])
+            spread_x = max(var_history['x']) - min(var_history['x'])
+            spread_y = max(var_history['y']) - min(var_history['y'])
+            spread_z = max(var_history['z']) - min(var_history['z'])
 
-            jetzt = time.time()
+            now = time.time()
 
-            if jetzt - letzte_ausgabe > ESTIMATOR_STATUS_EVERY:
-                print(f"[INFO] Kalman-Varianz  ΔX:{spanne_x:.5f} "
-                      f"ΔY:{spanne_y:.5f} ΔZ:{spanne_z:.5f} "
-                      f"(Ziel < {threshold})")
-                letzte_ausgabe = jetzt
+            if now - last_output > ESTIMATOR_STATUS_EVERY:
+                print(f"[INFO] Kalman variance  ΔX:{spread_x:.5f} "
+                      f"ΔY:{spread_y:.5f} ΔZ:{spread_z:.5f} "
+                      f"(target < {threshold})")
+                last_output = now
 
-            if spanne_x < threshold and spanne_y < threshold and spanne_z < threshold:
-                print(f"[INFO] Positionsschätzer konvergiert "
-                      f"(nach {jetzt - start_time:.1f}s).")
+            if spread_x < threshold and spread_y < threshold and spread_z < threshold:
+                print(f"[INFO] Position estimator converged "
+                      f"(after {now - start_time:.1f}s).")
                 return True
 
-            if jetzt - start_time > timeout:
-                print(f"[WARN] Timeout ({timeout:.0f}s) beim Warten auf Konvergenz!")
-                print(f"[WARN] Letzte Werte: ΔX:{spanne_x:.5f} "
-                      f"ΔY:{spanne_y:.5f} ΔZ:{spanne_z:.5f}")
-                print("[WARN] Positionsschätzung könnte am Anfang ungenau sein!")
+            if now - start_time > timeout:
+                print(f"[WARN] Timeout ({timeout:.0f}s) while waiting for convergence!")
+                print(f"[WARN] Last values: ΔX:{spread_x:.5f} "
+                      f"ΔY:{spread_y:.5f} ΔZ:{spread_z:.5f}")
+                print("[WARN] Position estimate may be inaccurate at the start!")
                 return False
 
     return False
 
 
 def reset_estimator(scf):
-    scf.cf.param.set_value('stabilizer.estimator', '2')  # Kalman-Filter erzwingen
+    scf.cf.param.set_value('stabilizer.estimator', '2')  # force Kalman filter
     time.sleep(0.1)
     scf.cf.param.set_value('kalman.resetEstimation', '1')
     time.sleep(0.1)
@@ -401,82 +400,82 @@ def reset_estimator(scf):
 
 
 # ============================================================
-# WEGPUNKTE NORMALISIEREN
+# NORMALIZE WAYPOINTS
 # ============================================================
 
-def normalisiere_wegpunkt(wp):
+def normalize_waypoint(wp):
     if len(wp) == 2:
         return (wp[0], wp[1], FLIGHT_HEIGHT)
     return (wp[0], wp[1], wp[2])
 
 
-def baue_mission():
-    mission = [normalisiere_wegpunkt(wp) for wp in WAYPOINTS]
+def build_mission():
+    mission = [normalize_waypoint(wp) for wp in WAYPOINTS]
     if mission and RETURN_TO_HOME:
-        letzter = mission[-1]
-        if abs(letzter[0]) > 1e-3 or abs(letzter[1]) > 1e-3:
+        last = mission[-1]
+        if abs(last[0]) > 1e-3 or abs(last[1]) > 1e-3:
             mission.append((0.0, 0.0, FLIGHT_HEIGHT))
     return mission
 
 
 # ============================================================
-# WEGPUNKT ANFLIEGEN
+# FLY TO WAYPOINT
 # ============================================================
 
-def fliege_zu_wegpunkt(mc, ziel_x, ziel_y, ziel_z, index, gesamt, mission_start_time):
-    global avoid_state, ziel_hoehe, shutdown_requested
+def fly_to_waypoint(mc, goal_x, goal_y, goal_z, index, total, mission_start_time):
+    global avoid_state, target_height, shutdown_requested
 
-    ziel_hoehe = ziel_z
+    target_height = goal_z
     avoid_state = AVOID_NONE
     start_time = time.time()
 
-    print(f"\n[WEGPUNKT {index + 1}/{gesamt}] Ziel: "
-          f"x={ziel_x:.2f} y={ziel_y:.2f} z={ziel_z:.2f}")
+    print(f"\n[WAYPOINT {index + 1}/{total}] Target: "
+          f"x={goal_x:.2f} y={goal_y:.2f} z={goal_z:.2f}")
 
     while True:
         if shutdown_requested:
             return False
 
         if time.time() - mission_start_time > MAX_FLIGHT_TIME:
-            print("[WARN] Maximale Flugzeit erreicht → Abbruch der Mission.")
+            print("[WARN] Maximum flight time reached → aborting mission.")
             shutdown_requested = True
             return False
 
         if time.time() - start_time > WAYPOINT_TIMEOUT:
-            print(f"[WARN] Timeout bei Wegpunkt {index + 1} → überspringe.")
+            print(f"[WARN] Timeout at waypoint {index + 1} → skipping.")
             return True
 
         x, y, _ = get_position()
-        dx = ziel_x - x
-        dy = ziel_y - y
+        dx = goal_x - x
+        dy = goal_y - y
         dist = math.hypot(dx, dy)
 
         if dist < WAYPOINT_TOLERANCE:
-            print(f"[WEGPUNKT {index + 1}/{gesamt}] erreicht (Abstand={dist:.2f}m)")
+            print(f"[WAYPOINT {index + 1}/{total}] reached (distance={dist:.2f}m)")
             return True
 
-        vx, vy, vz = berechne_geschwindigkeit(dx, dy, dist)
-        print_status(vx, vy, vz, ziel_info=f"| WP{index + 1}/{gesamt} dist:{dist:.2f}m")
+        vx, vy, vz = compute_velocity(dx, dy, dist)
+        print_status(vx, vy, vz, goal_info=f"| WP{index + 1}/{total} dist:{dist:.2f}m")
 
         mc.start_linear_motion(vx, vy, vz)
         time.sleep(LOOP_DT)
 
 
-def fliege_explore_modus(mc):
+def fly_explore_mode(mc):
     global shutdown_requested
 
-    print("\n[INFO] Keine Wegpunkte definiert → Explore-Modus aktiv.")
+    print("\n[INFO] No waypoints defined → Explore mode active.")
     start_time = time.time()
 
     while not shutdown_requested and (time.time() - start_time) < MAX_FLIGHT_TIME:
-        vx, vy, vz = berechne_geschwindigkeit()
+        vx, vy, vz = compute_velocity()
         print_status(vx, vy, vz)
         mc.start_linear_motion(vx, vy, vz)
         time.sleep(LOOP_DT)
 
 
 # ============================================================
-# HAUPTPROGRAMM
+# MAIN PROGRAM
 # ============================================================
 
 def main():
@@ -484,12 +483,12 @@ def main():
 
     cflib.crtp.init_drivers()
 
-    print("[INFO] Verbinde mit Crazyflie...")
-    print("[INFO] STRG+C zum Landen drücken\n")
+    print("[INFO] Connecting to Crazyflie...")
+    print("[INFO] Press STRG+C to land\n")
 
     with SyncCrazyflie(URI, cf=Crazyflie(rw_cache='./cache')) as scf:
 
-        # ── Sensor-Log (Multiranger) ──────────────────
+        # ── Sensor log (Multiranger) ──────────────────
         sensor_log = LogConfig(name='Ranger', period_in_ms=LOG_PERIOD_MS)
         sensor_log.add_variable('range.front',  'uint16_t')
         sensor_log.add_variable('range.back',   'uint16_t')
@@ -502,7 +501,7 @@ def main():
         sensor_log.data_received_cb.add_callback(sensor_callback)
         sensor_log.start()
 
-        # ── Positions-Log (Flow Deck / Kalman) ────────
+        # ── Position log (Flow Deck / Kalman) ────────
         position_log = LogConfig(name='Position', period_in_ms=100)
         position_log.add_variable('stateEstimate.x', 'float')
         position_log.add_variable('stateEstimate.y', 'float')
@@ -514,12 +513,12 @@ def main():
 
         time.sleep(0.5)
 
-        # ── Kalman-Filter zurücksetzen & Konvergenz abwarten ──
-        konvergiert = reset_estimator(scf)
+        # ── Reset Kalman filter & wait for convergence ──
+        converged = reset_estimator(scf)
 
-        if not konvergiert and ABORT_ON_ESTIMATOR_FAIL:
-            print("[FEHLER] Positionsschätzer konvergiert nicht. "
-                  "Bitte Untergrund/Beleuchtung prüfen. Abbruch.")
+        if not converged and ABORT_ON_ESTIMATOR_FAIL:
+            print("[ERROR] Position estimator did not converge. "
+                  "Please check surface/lighting. Aborting.")
             sensor_log.stop()
             position_log.stop()
             return
@@ -537,18 +536,18 @@ def main():
             print(f"[{STATE_FLIGHT}]\n")
 
             # ── FLIGHT / NAVIGATION ──────────────────
-            mission = baue_mission()
+            mission = build_mission()
             mission_start_time = time.time()
 
             if mission:
-                for i, (zx, zy, zz) in enumerate(mission):
-                    weiter = fliege_zu_wegpunkt(
-                        mc, zx, zy, zz, i, len(mission), mission_start_time
+                for i, (gx, gy, gz) in enumerate(mission):
+                    keep_going = fly_to_waypoint(
+                        mc, gx, gy, gz, i, len(mission), mission_start_time
                     )
-                    if not weiter and shutdown_requested:
+                    if not keep_going and shutdown_requested:
                         break
             else:
-                fliege_explore_modus(mc)
+                fly_explore_mode(mc)
 
             # ── LANDING ──────────────────────────────
             current_state = STATE_LANDING
@@ -558,12 +557,12 @@ def main():
             time.sleep(0.3)
             mc.land()
 
-            print(f"[{STATE_LANDING}] fertig")
+            print(f"[{STATE_LANDING}] done")
 
         sensor_log.stop()
         position_log.stop()
 
-    print("[INFO] Verbindung getrennt.")
+    print("[INFO] Connection closed.")
 
 
 if __name__ == '__main__':
