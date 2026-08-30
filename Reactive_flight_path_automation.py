@@ -1,3 +1,7 @@
+# Navigates to user-defined waypoints
+# avoids obstacles via potential fields
+# maintains altitude automatically
+
 import logging
 import math
 import signal
@@ -42,14 +46,13 @@ HEIGHT_AVERAGE_SAMPLES  = int((HEIGHT_AVERAGE_TIME * 1000) / LOG_PERIOD_MS)
 # x = forward, y = left, z = height (optional, defaults to FLIGHT_HEIGHT)
 # Leave empty for explore mode (fly forward, avoid stuff).
 WAYPOINTS = [
-    (0.0, 1.0),
-    (2.5, 1.0),
-    (2.5, 0.5),
-    (3.5, 0.5),
+    (1.0, 0.0),
+    (1.0, 1.0),
+    (1.0, -1.0),
 ]
 
-RETURN_TO_HOME       = False
-WAYPOINT_TOLERANCE   = 0.05
+RETURN_TO_HOME       = True
+WAYPOINT_TOLERANCE   = 0.10
 WAYPOINT_TIMEOUT     = 25.0
 GOAL_SPEED_MAX       = 0.2
 K_ATTRACTION         = 0.8
