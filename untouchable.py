@@ -1,3 +1,7 @@
+# takes off
+# evades objekt if they come to close
+# ctrl+c = lands
+
 import time
 import math
 import cflib.crtp
